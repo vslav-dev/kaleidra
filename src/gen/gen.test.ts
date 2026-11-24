@@ -107,12 +107,13 @@ describe('generator', () => {
     expect(finalizeLevel(draft, 0.9).moves).toBeGreaterThanOrEqual(finalizeLevel(draft, 0.4).moves);
   });
 
+  // The bound is the measured draft; the warm-up draft before it only counts against the test's own timeout.
   it('drafts a level fast enough for a worker during the previous level', () => {
     draftLevel(req(44));
     const start = performance.now();
     draftLevel(req(45));
     expect(performance.now() - start).toBeLessThan(3000);
-  });
+  }, 30_000);
 });
 
 describe('rotors', () => {
