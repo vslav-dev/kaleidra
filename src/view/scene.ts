@@ -1,4 +1,6 @@
 import { autoDetectRenderer, Container, type Renderer } from 'pixi.js';
+import { countDraws, perfContext, recordFrame } from '@/telemetry/perf';
+import { track } from '@/telemetry/telemetry';
 import { Tweens } from '@/view/tween';
 
 /** Quality steps the scene falls back through for good when frames stay slow. */
@@ -50,6 +52,10 @@ export class Scene {
       // Interaction is plain DOM pointer events; Pixi's event and accessibility systems are not needed.
       skipExtensionImports: true,
     });
+    track('gl', glInfo(renderer));
+    if ('gl' in renderer) countDraws(renderer.gl);
+    canvas.addEventListener('webglcontextlost', () => track('gl', { event: 'contextlost' }));
+    canvas.addEventListener('webglcontextrestored', () => track('gl', { event: 'contextrestored' }));
     return new Scene(renderer);
   }
 
@@ -65,6 +71,7 @@ export class Scene {
     this.width = width;
     this.height = height;
     this.renderer.resize(width, height, this.resolution);
+    this.reportSize();
     // Resizing wipes the canvas; drawing now keeps a blank frame off the screen.
     this.renderer.render(this.root);
     this.request();
@@ -90,8 +97,10 @@ export class Scene {
   }
 
   private readonly frame = (now: number): void => {
+    const start = performance.now();
     this.scheduled = false;
-    const dt = this.last ? Math.min(50, now - this.last) : 16;
+    const interval = this.last ? now - this.last : 0;
+    const dt = this.last ? Math.min(50, interval) : 16;
     this.last = now;
     const gameDt = this.stopLeft > 0 ? dt * HITSTOP_SPEED : dt;
     this.stopLeft = Math.max(0, this.stopLeft - dt);
@@ -99,7 +108,9 @@ export class Scene {
     let animating = false;
     for (const { fn, realTime } of this.updaters) if (fn(realTime ? dt : gameDt)) animating = true;
     this.dirty = false;
+    const updated = performance.now();
     this.renderer.render(this.root);
+    recordFrame({ interval, updateMs: updated - start, renderMs: performance.now() - updated });
     this.trackSpeed(dt);
     if (this.tweens.active || this.stopLeft > 0 || animating || this.dirty) {
       this.request();
@@ -114,6 +125,33 @@ export class Scene {
     this.quality++;
     this.slowFrames = 0;
     this.renderer.resize(this.width, this.height, this.resolution);
+    this.reportSize();
+    track('perf', { kind: 'quality', quality: this.quality, res: this.resolution, t: Math.round(performance.now() / 1000) });
     this.onQualityChange?.();
   }
+
+  /** CSS size, device pixel ratio and the backing size actually rendered (pixels per frame to fill). */
+  private reportSize(): void {
+    const res = this.resolution;
+    perfContext({
+      quality: this.quality,
+      dpr: window.devicePixelRatio,
+      res,
+      css: [Math.round(this.width), Math.round(this.height)],
+      px: [Math.round(this.width * res), Math.round(this.height * res)],
+    });
+  }
+}
+
+function glInfo(renderer: Renderer): Record<string, unknown> {
+  if (!('gl' in renderer)) return { renderer: renderer.name };
+  const gl = renderer.gl;
+  const ext = gl.getExtension('WEBGL_debug_renderer_info');
+  return {
+    renderer: renderer.name,
+    webgl: renderer.context.webGLVersion,
+    gpu: ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) as string : null,
+    maxTexture: gl.getParameter(gl.MAX_TEXTURE_SIZE) as number,
+    textureUnits: gl.getParameter(gl.MAX_TEXTURE_IMAGE_UNITS) as number,
+  };
 }

@@ -1,0 +1,50 @@
+name: Deploy
+
+# Push to `main` → checks → build → upload to vps-31 → atomic switch of the live release (games.vslav.dev/kaleidra/).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: VPS_31
+    env:
+      TARGET: /var/www/kaleidra
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+      - name: Write build info
+        run: echo "{\"commit\":\"$GITHUB_SHA\",\"time\":\"$(git log -1 --format=%cI)\"}" > dist/build-info.json
+
+      - name: Upload and activate
+        env:
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          HOST: ${{ secrets.HOST }}
+          USER: ${{ secrets.USER }}
+        run: |
+          mkdir -p ~/.ssh
+          install -m 600 /dev/null ~/.ssh/deploy_key
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+          SSH="ssh -i $HOME/.ssh/deploy_key"
+          RELEASE="$(date -u +%Y%m%d-%H%M%S)-${GITHUB_SHA::7}"
+          tar -czf build.tgz -C dist .
+          scp -i ~/.ssh/deploy_key build.tgz "$USER@$HOST:/tmp/kaleidra-$RELEASE.tgz"
+          $SSH "$USER@$HOST" bash -s -- "$TARGET" "$RELEASE" < deploy/activate.sh

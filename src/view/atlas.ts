@@ -1,4 +1,5 @@
 import { CanvasSource, Rectangle, Texture } from 'pixi.js';
+import { timed } from '@/telemetry/perf';
 import { PAINTERS, paintContext } from '@/view/art';
 
 const PAD = 2;
@@ -16,7 +17,7 @@ export class Atlas {
   public build(cell: number, resolution: number): boolean {
     const key = `${cell}@${resolution}`;
     if (key === this.key) return false;
-    this.paint(cell, resolution);
+    timed('atlas', () => this.paint(cell, resolution));
     // Set last: a failed paint must be retried next time, not leave the board with empty frames.
     this.key = key;
     return true;

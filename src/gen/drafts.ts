@@ -1,4 +1,5 @@
 import type { DraftRequest, LevelDraft } from '@/gen/generator';
+import { timed } from '@/telemetry/perf';
 
 const CACHE_SIZE = 4;
 
@@ -27,7 +28,7 @@ export class LevelDrafts {
     let draft = this.cache.get(key);
     if (!draft) {
       const id = this.nextId++;
-      draft = new Promise<LevelDraft>((resolve, reject) => this.pending.set(id, { resolve, reject }));
+      draft = timed('draft', () => new Promise<LevelDraft>((resolve, reject) => this.pending.set(id, { resolve, reject })));
       // A failed draft is not cached: the next request tries again.
       draft.catch(() => this.cache.delete(key));
       this.worker.postMessage({ id, ...req });

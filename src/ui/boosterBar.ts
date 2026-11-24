@@ -45,15 +45,26 @@ const METEOR_ICON = `<svg viewBox="0 0 48 48" aria-hidden="true">
 
 const ICONS: Record<Booster, string> = { [Booster.Star]: STAR_ICON, [Booster.Meteor]: METEOR_ICON };
 
+/** An arrow rising out of a ring, a spark beside it: something new is waiting. */
+const UPDATE_ICON = `<svg viewBox="0 0 48 48" aria-hidden="true">
+  <circle cx="24" cy="24" r="15" fill="none" stroke="currentColor" stroke-width="3" stroke-dasharray="70 25" stroke-linecap="round" transform="rotate(-60 24 24)"/>
+  <path d="M24 32V16M17 22.5 24 15.5 31 22.5" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M38 6l1.4 3.6L43 11l-3.6 1.4L38 16l-1.4-3.6L33 11l3.6-1.4z" fill="#fff"/>
+</svg>`;
+const POP_MS = 520;
+const POP_EASE = 'cubic-bezier(0.2, 1.6, 0.4, 1)';
+
 /**
  * The two booster buttons under the board, at its right edge. Each icon fills with color from below as its
  * charge grows, with no numbers. A ready booster glows; the star shows its stock as pips.
  */
 export class BoosterBar {
   private readonly giveUpEl: HTMLElement;
+  private readonly updateEl: HTMLElement;
 
   public constructor(private readonly el: HTMLElement) {
     el.innerHTML =
+      `<button class="update-btn" data-action="${Action.Update}" aria-label="${S.update.button}" hidden>${UPDATE_ICON}</button>` +
       `<button class="give-up" data-action="${Action.GiveUp}" hidden>${S.giveUp}</button>` +
       Object.values(Booster)
         .map(
@@ -64,6 +75,7 @@ export class BoosterBar {
         )
         .join('');
     this.giveUpEl = el.querySelector('.give-up')!;
+    this.updateEl = el.querySelector('.update-btn')!;
   }
 
   /** Under the board, as wide as it. */
@@ -102,5 +114,12 @@ export class BoosterBar {
     this.giveUpEl.hidden = !on;
     this.el.querySelectorAll('.booster.ready').forEach((b) => b.classList.toggle('beckon', on));
     if (!on) this.el.querySelectorAll('.booster').forEach((b) => b.classList.remove('beckon'));
+  }
+
+  /** A new version is out: its button appears at the bar's left end, with one pop to catch the eye. */
+  public showUpdate(): void {
+    if (!this.updateEl.hidden) return;
+    this.updateEl.hidden = false;
+    this.updateEl.animate([{ transform: 'scale(0)', opacity: 0, easing: POP_EASE }, { transform: 'scale(1)', opacity: 1 }], POP_MS);
   }
 }

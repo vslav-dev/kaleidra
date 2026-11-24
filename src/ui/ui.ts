@@ -1,3 +1,4 @@
+import type { Update } from '@/app/updates';
 import { type GameState, type LevelDef, LevelKind, type Objective, ObjectiveKind, Special } from '@/core/types';
 import { FrameName, frameDataUrl } from '@/view/art';
 import { S } from '@/ui/strings';
@@ -23,6 +24,9 @@ export const Action = {
   Star: 'star',
   Meteor: 'meteor',
   GiveUp: 'give-up',
+  Update: 'update',
+  UpdateLater: 'update-later',
+  ApplyUpdate: 'apply-update',
 } as const;
 export type Action = (typeof Action)[keyof typeof Action];
 
@@ -77,7 +81,7 @@ export class Ui {
 
   // ---------- screens ----------
 
-  public showTitle(level: number, resumable: boolean): void {
+  public showTitle(level: number, resumable: boolean, update: boolean): void {
     this.setTheme(level);
     this.open(
       `<div class="title-screen">
@@ -87,6 +91,7 @@ export class Ui {
         <p class="tagline">${S.tagline}</p>
         <button class="btn primary big" data-action="${Action.Play}">${resumable ? S.resume(level) : S.play(level)}</button>
         <button class="btn ghost" data-action="${Action.Shapes}">${S.howTo}</button>
+        ${update ? `<button class="btn ghost update-link" data-action="${Action.Update}">✨ ${S.update.button}</button>` : ''}
         <p class="version">v${__APP_VERSION__}</p>
       </div>`,
       true,
@@ -201,6 +206,22 @@ export class Ui {
         <div class="hud-goals" style="margin:12px auto">${goals}</div>
         <button class="btn primary big" data-action="${Action.Retry}">${S.retry}</button>
         <button class="btn ghost" data-action="${Action.Menu}">${S.menu}</button>
+      </div>`,
+    );
+  }
+
+  /** What the new version brings, release by release since the one running here. */
+  public showUpdate(current: string, update: Update): void {
+    const releases = update.releases
+      .map((r) => `<div class="release"><h3>${S.update.release(r.version, r.date)}</h3><ul>${r.changes.map((c) => `<li>${escapeHtml(c)}</li>`).join('')}</ul></div>`)
+      .join('');
+    this.open(
+      `<div class="card update">
+        <h2>${S.update.title}</h2>
+        <p>${S.update.versions(current, update.version)}</p>
+        <div class="releases">${releases}</div>
+        <button class="btn primary big" data-action="${Action.ApplyUpdate}">${S.update.apply}</button>
+        <button class="btn ghost" data-action="${Action.UpdateLater}">${S.update.later}</button>
       </div>`,
     );
   }
@@ -403,4 +424,8 @@ function mandala(): string {
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function escapeHtml(text: string): string {
+  return text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 }

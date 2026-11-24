@@ -1,5 +1,6 @@
 import { EARN, spend, stock, winGain, withGain } from '@/app/boosters';
 import { type Attempt, clearSave, type CurrentLevel, defaultSave, loadSave, persist, randomSeed, type SaveData } from '@/app/save';
+import { type Update, UpdateWatch } from '@/app/updates';
 import { AudioBus } from '@/audio/audio';
 import { Sfx } from '@/audio/synth';
 import { goalsOf, type MoveOptions, moveOptions } from '@/bot/features';
@@ -13,6 +14,9 @@ import { DIFFICULTIES, targetWinRate } from '@/player/difficulty';
 import { observeMove, observeOutcome, twinOf } from '@/player/model';
 import { paceFactor, updatePace } from '@/player/pace';
 import { updateThreeStars } from '@/player/stars';
+import { AttemptEnd, type AttemptRecord, newRecord, recordMiss, recordMove, recordStrike, trackAttempt } from '@/telemetry/attempt';
+import { flushPerf, perfContext, timed } from '@/telemetry/perf';
+import { track } from '@/telemetry/telemetry';
 import { BOOSTER_FOOTER, BoosterBar } from '@/ui/boosterBar';
 import { S } from '@/ui/strings';
 import { Action, Ui } from '@/ui/ui';
@@ -28,6 +32,8 @@ const Mode = {
   Finale: 'finale',
   Won: 'won',
   Lost: 'lost',
+  /** the update notice is open */
+  Update: 'update',
 } as const;
 type Mode = (typeof Mode)[keyof typeof Mode];
 
@@ -37,8 +43,6 @@ const CHAIN_MAX_SPEED = 3;
 const chainSpeed = (cascade: number): number => Math.min(CHAIN_MAX_SPEED, CHAIN_RAMP ** Math.max(0, cascade - 1));
 /** An outcome eased by boosters teaches the player's strength this much: the twin plays without them. */
 const BOOSTED_WEIGHT = 0.5;
-const AttemptEnd = { Won: 'won', Lost: 'lost', Abandoned: 'abandoned' } as const;
-type AttemptEnd = (typeof AttemptEnd)[keyof typeof AttemptEnd];
 
 const LAYER_SFX: Record<Layer, Sfx> = { [Layer.Ice]: Sfx.Frost, [Layer.Crate]: Sfx.Stone, [Layer.Chain]: Sfx.Lock };
 
@@ -61,6 +65,12 @@ export class GameApp {
   private lastTo = -1;
   /** the hint was showing when the player moved: such a move says nothing about their taste */
   private hinted = false;
+  /** when the board came to rest for the player: how long they thought before a move */
+  private thinkFrom = 0;
+  /** a newer build is live */
+  private update: Update | null = null;
+  /** where the update notice returns to */
+  private updateReturn: Mode = Mode.Title;
   private aiming: Booster | null = null;
   private readonly debugEl = new URLSearchParams(location.search).has('debug') ? createDebugEl() : null;
   private readonly stage: HTMLElement;
@@ -73,7 +83,7 @@ export class GameApp {
     this.ui = new Ui(root, (action) => void this.onAction(action));
     this.boosters = new BoosterBar(root.querySelector<HTMLElement>('#boosters')!);
     this.view = new BoardView(scene, canvas, {
-      onSwap: (a, b) => void this.onSwap(a, b),
+      onSwap: (a, b, drag) => this.onSwap(a, b, drag),
       onStrike: (at) => this.onStrike(at),
       onLayerHit: (layer) => this.audio.play(LAYER_SFX[layer]),
       onLayout: (rect) => this.boosters.place(rect),
@@ -107,11 +117,14 @@ export class GameApp {
     this.showTitle();
     // The first level is built while the title shows.
     void this.drafts.get(this.draftRequest(this.save.level));
+    new UpdateWatch(__APP_VERSION__, (update) => this.onUpdate(update)).start();
   }
 
   // ---------- levels ----------
 
   private showTitle(): void {
+    flushPerf('title');
+    perfContext({ level: null, board: null });
     this.mode = Mode.Title;
     this.game = null;
     this.aiming = null;
@@ -119,7 +132,7 @@ export class GameApp {
     this.view.clear();
     this.ui.hideHud();
     this.boosters.hide();
-    this.ui.showTitle(this.save.level, this.save.current?.attempt != null);
+    this.ui.showTitle(this.save.level, this.save.current?.attempt != null, this.update !== null);
   }
 
   /** The level to play now; a new one is built when the saved one is done or stale. The next one is built meanwhile. */
@@ -147,13 +160,16 @@ export class GameApp {
     const { settings, player } = this.save;
     const target = targetWinRate(planLevel(n).baseWinRate, settings.difficulty, current.fails);
     const def = finalizeLevel(current.draft, target, player.threeStars);
-    current.attempt = { game: createGame(def, randomSeed()), target };
+    const seed = randomSeed();
+    current.attempt = { game: createGame(def, seed), record: newRecord(seed), target, threeStars: player.threeStars };
     return current.attempt;
   }
 
   private async playLevel(): Promise<void> {
     let fresh = false;
-    await this.ui.curtain(async () => {
+    flushPerf('level');
+    // Measured behind the curtain: draft wait, calibration, board build.
+    await this.ui.curtain(() => timed('level', async () => {
       const current = await this.currentLevel();
       fresh = current.attempt === null;
       const game = (current.attempt ?? this.startAttempt(current)).game;
@@ -162,6 +178,7 @@ export class GameApp {
       this.lastTo = -1;
       this.aiming = null;
       if (this.debugEl) for (const b of Object.values(Booster)) this.save.boosters[b] = EARN[b].unit * EARN[b].max;
+      perfContext({ level: game.level.number, board: `${game.board.cols}x${game.board.rows}` });
       this.view.inputEnabled = false;
       persist(this.save);
       this.ui.setTheme(game.level.number);
@@ -173,7 +190,7 @@ export class GameApp {
       this.fit();
       this.view.setBoard(game.board);
       this.showDebug();
-    });
+    }));
     const game = this.game;
     const current = this.save.current;
     if (!game || !current) return;
@@ -192,7 +209,38 @@ export class GameApp {
     await this.run(game);
   }
 
-  private onSwap(a: Pos, b: Pos): void {
+  /** A newer build is live: its button shows under the board, and on the title screen. */
+  private onUpdate(update: Update): void {
+    this.update = update;
+    track('update', { event: 'found', to: update.version });
+    this.boosters.showUpdate();
+    if (this.mode === Mode.Title) this.showTitle();
+  }
+
+  /** The notice: what the new version brings. From play it pauses the level; "later" goes back where it was. */
+  private openUpdate(): void {
+    if (!this.update || (this.mode !== Mode.Play && this.mode !== Mode.Title)) return;
+    this.updateReturn = this.mode;
+    if (this.mode === Mode.Play) this.pause();
+    this.mode = Mode.Update;
+    this.ui.showUpdate(__APP_VERSION__, this.update);
+  }
+
+  private closeUpdate(): void {
+    if (this.mode !== Mode.Update) return;
+    if (this.updateReturn === Mode.Play) this.resume();
+    else this.showTitle();
+  }
+
+  /** Reloads into the new build once the save is written: a level in progress resumes where it was. */
+  private applyUpdate(): void {
+    track('update', { event: 'applied', to: this.update?.version ?? null });
+    flushPerf('update');
+    persist(this.save);
+    location.reload();
+  }
+
+  private onSwap(a: Pos, b: Pos, drag: boolean): void {
     const game = this.game;
     if (!game || this.mode !== Mode.Play || this.running === game || !canAct(game)) return;
     const ev = makeMove(game, a, b);
@@ -200,6 +248,9 @@ export class GameApp {
     this.view.inputEnabled = false;
     this.hinted = this.view.hintShown;
     this.view.cancelHint();
+    const record = this.recordOf(game);
+    if (record && ev.valid) recordMove(record, game.board, a, b, this.hinted, performance.now() - this.thinkFrom, drag);
+    else if (record) recordMiss(record, game.board, a, b);
     if (ev.valid) this.learn(game, a, b);
     void this.view.play([ev], (e) => this.feedback(e)).then(() => {
       if (ev.valid) void this.run(game);
@@ -225,7 +276,7 @@ export class GameApp {
     this.running = game;
     this.updateBoosters();
     while (this.game === game) {
-      const events = advance(game);
+      const events = timed('advance', () => advance(game));
       if (!events) break;
       this.ui.updateHud(game);
       this.scene.tweens.speed = chainSpeed(game.cascade);
@@ -252,7 +303,8 @@ export class GameApp {
     } else if (game.status === 'lost') {
       this.showLose(game);
     } else {
-      this.rest = moveOptions(game.board, goalsOf(game), this.lastTo);
+      this.rest = timed('options', () => moveOptions(game.board, goalsOf(game), this.lastTo));
+      this.thinkFrom = performance.now();
       this.view.inputEnabled = true;
       this.view.armHint();
       this.updateBoosters();
@@ -288,6 +340,8 @@ export class GameApp {
     if (!game || !booster || this.running === game) return;
     this.stopAim();
     if (!strike(game, booster, at)) return;
+    const record = this.recordOf(game);
+    if (record) recordStrike(record, game.board, booster, at);
     spend(this.save.boosters, booster);
     this.boosters.beckon(false);
     this.view.inputEnabled = false;
@@ -303,13 +357,22 @@ export class GameApp {
 
   // ---------- results ----------
 
-  /** Lets the player's strength, star rate and pace learn from a finished attempt. */
-  private endAttempt(game: GameState, end: AttemptEnd, stars: number): void {
+  /** The record of the attempt this game plays, if it is the current one. */
+  private recordOf(game: GameState): AttemptRecord | null {
+    const attempt = this.save.current?.attempt;
+    return attempt?.game === game ? attempt.record : null;
+  }
+
+  /** Reports the attempt, then lets the player's strength, star rate and pace learn from it. */
+  private endAttempt(game: GameState, end: AttemptEnd, left: number, stars: number): void {
     const current = this.save.current;
-    if (!current || current.attempt?.game !== game) return;
-    const { player } = this.save;
+    const attempt = current?.attempt;
+    if (!current || !attempt || attempt.game !== game) return;
+    const { player, settings } = this.save;
+    const { record, target, threeStars } = attempt;
+    trackAttempt({ draft: current.draft, game, record, end, left, stars, fails: current.fails, difficulty: settings.difficulty, target, threeStars, model: player.model });
     // An abandoned attempt has no outcome: it teaches neither strength nor stars.
-    if (end !== AttemptEnd.Abandoned) observeOutcome(player.model, end === AttemptEnd.Won, game.level.targetWinRate, game.strikes > 0 ? BOOSTED_WEIGHT : 1);
+    if (end !== AttemptEnd.Restart) observeOutcome(player.model, end === AttemptEnd.Won, game.level.targetWinRate, game.strikes > 0 ? BOOSTED_WEIGHT : 1);
     if (end === AttemptEnd.Won) player.threeStars = updateThreeStars(player.threeStars, stars === 3);
     const progress = Math.min(...game.level.objectives.map((o, k) => game.progress[k] / o.target));
     player.pace = updatePace(player.pace, twinMoves(current.draft, game.level), game.movesMade, progress);
@@ -331,7 +394,7 @@ export class GameApp {
     }
     const stars = starsFor(game);
     this.save.boosters = withGain(this.save.boosters, winGain(movesAtWin, stars));
-    this.endAttempt(game, AttemptEnd.Won, stars);
+    this.endAttempt(game, AttemptEnd.Won, movesAtWin, stars);
     const n = game.level.number;
     this.save.stars[n - 1] = Math.max(this.save.stars[n - 1] ?? 0, stars);
     this.save.level = n + 1;
@@ -374,7 +437,7 @@ export class GameApp {
     const current = this.save.current;
     const game = current?.attempt?.game;
     if (!current || !game) return;
-    this.endAttempt(game, end, 0);
+    this.endAttempt(game, end, game.movesLeft, 0);
     current.fails++;
     current.attempt = null;
     persist(this.save);
@@ -383,6 +446,8 @@ export class GameApp {
   // ---------- menus ----------
 
   private pause(): void {
+    const record = this.game ? this.recordOf(this.game) : null;
+    if (record) record.pauses++;
     if (this.aiming) this.stopAim();
     this.mode = Mode.Pause;
     this.view.inputEnabled = false;
@@ -413,7 +478,7 @@ export class GameApp {
         this.resume();
         return;
       case Action.Restart:
-        this.failLevel(AttemptEnd.Abandoned);
+        this.failLevel(AttemptEnd.Restart);
         this.game = null;
         await this.playLevel();
         return;
@@ -474,6 +539,15 @@ export class GameApp {
         return;
       case Action.GiveUp:
         if (this.game) this.showLose(this.game);
+        return;
+      case Action.Update:
+        this.openUpdate();
+        return;
+      case Action.UpdateLater:
+        this.closeUpdate();
+        return;
+      case Action.ApplyUpdate:
+        this.applyUpdate();
         return;
     }
   }

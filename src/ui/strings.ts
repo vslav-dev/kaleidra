@@ -67,6 +67,14 @@ export const S = {
     prism: '5 в ряд — призма: убирает все камни одного цвета.',
     combo: 'Поменяй два бонуса местами — сработают вместе и сильнее.',
   },
+  update: {
+    button: 'Обновление',
+    title: 'Вышло обновление',
+    versions: (current: string, next: string): string => `У вас версия ${current}, новая — ${next}`,
+    release: (version: string, date: string): string => `${version} · ${date.split('-').reverse().join('.')}`,
+    apply: 'Обновить',
+    later: 'Позже',
+  },
   boosters: {
     star: 'Падающая звезда копится из сэкономленных ходов. Бьёт клетку и шесть соседей насквозь.',
     meteor: 'Метеорит копится за победы на 2–3 звезды. Пробивает всё в большом шестиугольнике.',

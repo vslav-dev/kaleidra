@@ -6,6 +6,7 @@ import { directionOf, screenRow } from '@/core/hex';
 import { findMoves } from '@/core/moves';
 import { strikeCells } from '@/core/resolve';
 import { type Blast, BlastKind, type Board, Booster, type GameEvent, NO_COLOR, type Piece, type Pos, type RotorTurn, Special } from '@/core/types';
+import { perfContext, timed } from '@/telemetry/perf';
 import { AXIS_ANGLE, FrameName, GEM_TINTS } from '@/view/art';
 import { Atlas } from '@/view/atlas';
 import { Burst } from '@/view/bursts';
@@ -51,7 +52,8 @@ export interface BoardRect {
 }
 
 export interface BoardListener {
-  onSwap(a: Pos, b: Pos): void;
+  /** `drag`: entered by a drag, else by two taps */
+  onSwap(a: Pos, b: Pos, drag: boolean): void;
   /** the player released an aimed booster over this cell */
   onStrike(at: Pos): void;
   /** a blocker layer visibly took a hit (for sound) */
@@ -173,7 +175,8 @@ export class BoardView {
     this.particles.cell = 2 * s * 0.9;
     this.particles.density = this.scene.particleDensity;
     this.camera.frame(width / 2, room / 2, 2 * s);
-    this.rebuild();
+    perfContext({ cell: 2 * s });
+    timed('rebuild', () => this.rebuild());
     this.input.onLayout({ x: this.originX, y: this.originY, width: boardW, height: boardH });
   }
 
@@ -376,7 +379,7 @@ export class BoardView {
     if (this.selected !== null && this.selected !== cell && this.isNeighbor(this.selected, cell)) {
       const from = this.selected;
       this.select(null);
-      this.swap(from, cell);
+      this.swap(from, cell, false);
       return;
     }
     this.drag = { cell, x, y };
@@ -401,7 +404,7 @@ export class BoardView {
     this.drag = null;
     const target = neighbor(this.board, drag.cell, directionOf(dx, dy));
     this.select(null);
-    if (target >= 0) this.swap(drag.cell, target);
+    if (target >= 0) this.swap(drag.cell, target, true);
   }
 
   private onUp(e: PointerEvent): void {
@@ -423,8 +426,8 @@ export class BoardView {
     return { r: Math.floor(i / cols), c: i % cols };
   }
 
-  private swap(from: number, to: number): void {
-    this.input.onSwap(this.pos(from), this.pos(to));
+  private swap(from: number, to: number, drag: boolean): void {
+    this.input.onSwap(this.pos(from), this.pos(to), drag);
   }
 
   private select(cell: number | null): void {

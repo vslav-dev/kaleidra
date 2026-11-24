@@ -4,9 +4,11 @@ import type { LevelDraft } from '@/gen/generator';
 import { Difficulty } from '@/player/difficulty';
 import { MODEL_VERSION, newModel, type PlayerModel } from '@/player/model';
 import { initialThreeStars } from '@/player/stars';
+import type { AttemptRecord } from '@/telemetry/attempt';
+import { timed } from '@/telemetry/perf';
 
 const KEY = 'kaleidra-save';
-const VERSION = 1;
+const VERSION = 2;
 
 export interface Settings {
   sound: boolean;
@@ -14,10 +16,12 @@ export interface Settings {
   difficulty: Difficulty;
 }
 
-/** An attempt in progress: the game, and the target its level was finalized for. */
+/** An attempt in progress: the game, the record that replays it, and the numbers its level was finalized with. */
 export interface Attempt {
   game: GameState;
+  record: AttemptRecord;
   target: number;
+  threeStars: number;
 }
 
 /** The level being played: as built for the player, failures so far, and the unfinished attempt, if any. */
@@ -81,7 +85,7 @@ export function loadSave(): SaveData {
 
 export function persist(data: SaveData): void {
   try {
-    localStorage.setItem(KEY, JSON.stringify(data));
+    localStorage.setItem(KEY, timed('persist', () => JSON.stringify(data)));
   } catch {
     // Storage full or blocked (private mode): the game plays on, progress just is not kept.
   }
